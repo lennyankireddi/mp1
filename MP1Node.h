@@ -31,6 +31,7 @@
 enum MsgTypes{
     JOINREQ,
     JOINREP,
+	GOSSIP,
     DUMMYLASTMSGTYPE
 };
 
@@ -70,10 +71,14 @@ public:
 	void nodeLoop();
 	void checkMessages();
 	bool recvCallBack(void *env, char *data, int size);
+	void sendJoinRep(Member *introducer, Address *joiner);
 	void nodeLoopOps();
 	int isNullAddress(Address *addr);
 	Address getJoinAddress();
 	void initMemberListTable(Member *memberNode);
+	void updateMemberListTable(vector<MemberListEntry> *ml);
+	void removeMemberListEntry(string id);
+	void printMemberList(vector<MemberListEntry> *ml);
 	void printAddress(Address *addr);
 	virtual ~MP1Node();
 };

@@ -96,8 +96,8 @@ int MP1Node::initThisNode(Address *joinaddr) {
 	/*
 	 * This function is partially implemented and may require changes
 	 */
-	int id = *(int*)(&memberNode->addr.addr);
-	int port = *(short*)(&memberNode->addr.addr[4]);
+	//int id = *(int*)(&memberNode->addr.addr);
+	//int port = *(short*)(&memberNode->addr.addr[4]);
 
 	memberNode->bFailed = false;
 	memberNode->inited = true;
@@ -118,6 +118,7 @@ int MP1Node::initThisNode(Address *joinaddr) {
  * DESCRIPTION: Join the distributed system
  */
 int MP1Node::introduceSelfToGroup(Address *joinaddr) {
+
 	MessageHdr *msg;
 #ifdef DEBUGLOG
     static char s[1024];
@@ -145,7 +146,9 @@ int MP1Node::introduceSelfToGroup(Address *joinaddr) {
 #endif
 
         // send JOINREQ message to introducer member
+        //char *message = "JOINREQ";
         emulNet->ENsend(&memberNode->addr, joinaddr, (char *)msg, msgsize);
+        log->LOG(&memberNode->addr, "JOINREQ msg sent.");
 
         free(msg);
     }
@@ -163,6 +166,9 @@ int MP1Node::finishUpThisNode(){
    /*
     * Your code goes here
     */
+    memberNode->inited = false;
+	memberNode->inGroup = false;
+    return 0;
 }
 
 /**
@@ -218,6 +224,72 @@ bool MP1Node::recvCallBack(void *env, char *data, int size ) {
 	/*
 	 * Your code goes here
 	 */
+    MessageHdr *msg = (MessageHdr *)data;
+    Address *sender = (Address *)(data + sizeof(MessageHdr));
+    long *htbt = (long *)(data + sizeof(MessageHdr) + sizeof(Address) + 1);
+    
+    // JOINREQ message received at introducer
+    if (memberNode->addr.getAddress() == "1:0" && msg->msgType == JOINREQ) {
+        MemberListEntry *le = new MemberListEntry(sender->addr[0], sender->addr[4], *htbt, par->getcurrtime());
+        memberNode->memberList.push_back(*le);
+        log->logNodeAdd(&memberNode->addr, sender);
+        sendJoinRep(memberNode, sender);
+    }
+
+    // JOINREP message received at node
+    if (msg->msgType == JOINREP && memberNode->addr.getAddress() != "1:0") {
+        if (!memberNode->inGroup) {
+            memberNode->inGroup = true;
+        }
+
+        vector<MemberListEntry> *ml = (vector<MemberListEntry> *)(data + sizeof(MessageHdr) + sizeof(Address) + 1 + sizeof(long) + sizeof(int));
+        //int *mleSize = (int *)(data + sizeof(MessageHdr) + sizeof(Address) + 1 + sizeof(long));
+        // cout << endl << "JOINREP - At " + memberNode->addr.getAddress() + ", member list received from " + sender->getAddress() + " has " << *mleSize << " members:" << endl;
+        // printMemberList(ml);
+        updateMemberListTable(ml);
+    }
+
+    // GOSSIP message received at node
+    if (msg->msgType == GOSSIP) {
+        if (memberNode->inGroup) {
+            vector<MemberListEntry> *ml = (vector<MemberListEntry> *)(data + sizeof(MessageHdr) + sizeof(Address) + 1 + sizeof(long) + sizeof(int));
+            //int *mleSize = (int *)(data + sizeof(MessageHdr) + sizeof(Address) + 1 + sizeof(long));
+            // cout << endl << "GOSSIP - At " + memberNode->addr.getAddress() + ", member list received from " + sender->getAddress() + " has " << *mleSize << " members:" << endl;
+            // printMemberList(ml);
+            updateMemberListTable(ml);
+        }
+    }
+
+    return true;
+}
+
+/**
+ * FUNCTION NAME: sendJoinRep
+ *
+ * DESCRIPTION: Used by node 1 to send JOIN responses
+ */
+void MP1Node::sendJoinRep(Member *introducer, Address *joiner) {
+    // Construct message holder
+    size_t msgsize = sizeof(MessageHdr) + sizeof(joiner->addr) + sizeof(long) + 1 + sizeof(int) + (memberNode->memberList.size() * sizeof(MemberListEntry));
+    MessageHdr *msg = (MessageHdr *)malloc(msgsize * sizeof(MessageHdr));
+
+    // create JOINREP message
+    msg->msgType = JOINREP;
+    memcpy((char *)(msg+1), &introducer->addr.addr, sizeof(introducer->addr.addr));
+    memcpy((char *)(msg+1) + 1 + sizeof(introducer->addr.addr), &introducer->heartbeat, sizeof(long));
+    
+    // Add member list
+    int mlSize = memberNode->memberList.size();
+    memcpy((char *)(msg+1) + 1 + sizeof(introducer->addr.addr) + sizeof(long), &mlSize, sizeof(int));
+    memcpy((char *)(msg+1) + 1 + sizeof(introducer->addr.addr) + sizeof(long) + sizeof(int), &memberNode->memberList, memberNode->memberList.size() * sizeof(MemberListEntry));
+
+    // cout << endl << "At " + memberNode->addr.getAddress() + ", member list being sent to " + joiner->getAddress() + " in JOINREP has " << memberNode->memberList.size() << " members:" << endl;
+    // printMemberList(&memberNode->memberList);
+
+    emulNet->ENsend(&memberNode->addr, joiner, (char *)msg, msgsize);
+    log->LOG(&memberNode->addr, "JOINREP msg sent.");
+
+    free(msg);
 }
 
 /**
@@ -232,7 +304,61 @@ void MP1Node::nodeLoopOps() {
 	/*
 	 * Your code goes here
 	 */
+    
+    // If not failed, send member list to other nodes
+    if (!memberNode->bFailed) {
+        // Update own heartbeat and timestamp
+        // Check for failed nodes
+        memberNode->heartbeat++;
+        vector<string> removeIds;
+        for (MemberListEntry &le : memberNode->memberList) {
+            string leAddr = to_string(le.id) + ":" + to_string(le.port);
+            if (leAddr == memberNode->addr.getAddress()) {
+                le.heartbeat++;
+                le.timestamp = par->getcurrtime();
+            }
+            else {
+                // If current time is TREMOVE greater than timestamp, remove
+                if (par->getcurrtime() - le.timestamp >= TREMOVE) {
+                    cout << "[" << par->getcurrtime() << "]" << " H: " << le.heartbeat << " T: " << le.timestamp << " . Removing " << to_string(le.id) + ":" + to_string(le.port) << " from member list at " << memberNode->addr.getAddress() << endl;
+                    removeIds.push_back(to_string(le.id) + ":" + to_string(le.port));
+                }
+            }
+        }
 
+        for (string id : removeIds) {
+            removeMemberListEntry(id);
+        }
+
+        // Send updated member list table to others
+        // Construct message holder
+        size_t msgsize = sizeof(MessageHdr) + sizeof(memberNode->addr) + sizeof(long) + 1 + sizeof(int) + (memberNode->memberList.size() * sizeof(MemberListEntry));
+        MessageHdr *msg = (MessageHdr *)malloc(msgsize * sizeof(MessageHdr));
+
+        // create JOINREP message
+        msg->msgType = GOSSIP;
+        memcpy((char *)(msg+1), &memberNode->addr.addr, sizeof(memberNode->addr.addr));
+        memcpy((char *)(msg+1) + 1 + sizeof(memberNode->addr.addr), &memberNode->heartbeat, sizeof(long));
+        
+        // Add member list
+        int mlSize = memberNode->memberList.size();
+        memcpy((char *)(msg+1) + 1 + sizeof(memberNode->addr.addr) + sizeof(long), &mlSize, sizeof(int));
+        memcpy((char *)(msg+1) + 1 + sizeof(memberNode->addr.addr) + sizeof(long) + sizeof(int), &memberNode->memberList, memberNode->memberList.size() * sizeof(MemberListEntry));
+
+        // Send to each node in current member list
+        for (MemberListEntry le : memberNode->memberList) {
+            string leAddr = to_string(le.id) + ":" + to_string(le.port);
+            // Don't send to oneself
+            if (leAddr != memberNode->addr.getAddress()) {
+                emulNet->ENsend(&memberNode->addr, new Address(leAddr), (char *)msg, msgsize);
+            }
+        }
+
+        free(msg);
+
+        // cout << endl << "Node loop: [" + to_string(par->getcurrtime()) + "] " + memberNode->addr.getAddress() + ": " << memberNode->memberList.size() << " members:" << endl;
+        // printMemberList(&memberNode->memberList);
+    }
     return;
 }
 
@@ -267,6 +393,72 @@ Address MP1Node::getJoinAddress() {
  */
 void MP1Node::initMemberListTable(Member *memberNode) {
 	memberNode->memberList.clear();
+    // Add the node to its own member list
+    MemberListEntry *nle = new MemberListEntry(memberNode->addr.addr[0], memberNode->addr.addr[4], memberNode->heartbeat, par->getcurrtime());
+    memberNode->memberList.push_back(*nle);
+    log->logNodeAdd(&memberNode->addr, &memberNode->addr);
+}
+
+/**
+ * FUNCTION NAME: updateMemberListTable
+ *
+ * DESCRIPTION: Updates the current node's member list table based on incoming list from another node
+ */
+void MP1Node::updateMemberListTable(vector<MemberListEntry> *ml) {
+    for(MemberListEntry mle : *ml) {
+        if (mle.heartbeat > 10000 || mle.timestamp > 10000 || mle.id > par->EN_GPSZ) return;
+        bool matchFound = false;
+        for(MemberListEntry &le : memberNode->memberList) {
+            if (mle.id == le.id) {
+                // Entry is in the list - update it
+                matchFound = true;
+                if (mle.timestamp >= le.timestamp) 
+                {
+                    // If incoming timestamp is later, update heartbeat
+                    // But only if local token is not bigger than incoming
+                    if (mle.heartbeat > le.heartbeat) {
+                        le.heartbeat = mle.heartbeat;
+                        le.timestamp = par->getcurrtime();
+                    }
+                }
+                break;
+            }
+        }
+        if (!matchFound) {
+            // Entry doesn't exist - add
+            if (par->getcurrtime() - mle.timestamp <= TFAIL) {
+                if (mle.id > 0 && mle.id <= par->EN_GPSZ) {
+                    MemberListEntry *nle = new MemberListEntry(mle.id, mle.port, mle.heartbeat, par->getcurrtime());
+                    memberNode->memberList.push_back(*nle);
+                    log->logNodeAdd(&memberNode->addr, new Address(to_string(mle.id) + ":" + to_string(mle.port)));
+                }
+            }
+        }
+    }
+}
+
+/**
+ * FUNCTION NAME: removeMemberListEntry
+ *
+ * DESCRIPTION: Removes entry with given ID from current node's member list
+ */
+void MP1Node::removeMemberListEntry(string id) {
+    Address *nodeAddr = new Address(id);
+    memberNode->myPos = find_if(begin(memberNode->memberList), end(memberNode->memberList), [id](MemberListEntry mle) { return id == (to_string(mle.id) + ":" + to_string(mle.port)); });
+    memberNode->memberList.erase(memberNode->myPos);
+    log->logNodeRemove(&memberNode->addr, nodeAddr);
+}
+
+/**
+ * FUNCTION NAME: printMemberList
+ *
+ * DESCRIPTION: Print the member list at the node
+ */
+void MP1Node::printMemberList(vector<MemberListEntry> *ml) {
+    cout << endl;
+    for (MemberListEntry le : *ml) {
+        cout << le.id << ":" << le.port << "," << le.heartbeat << "," << le.timestamp << endl;
+    }
 }
 
 /**
